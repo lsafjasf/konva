@@ -429,6 +429,7 @@ export abstract class Node<Config extends NodeConfig = NodeConfig> {
   clearCache() {
     this._releaseCanvasCache();
     this._clearSelfAndDescendantCache();
+    this._markPartialFullRedraw();
     this._requestDraw();
     return this;
   }
@@ -525,6 +526,20 @@ export abstract class Node<Config extends NodeConfig = NodeConfig> {
     x -= offset;
     y -= offset;
 
+    // graceful degradation on a pixel-budget overflow: keep rendering the
+    // node uncached instead of allocating an oversized bitmap. The budget
+    // counts device pixels (Konva.maxCachePixels, 0 disables the limit).
+    const cacheRatio = pixelRatio || Konva.pixelRatio || 1;
+    const cachePixels =
+      Math.max(1, Math.floor(width * cacheRatio)) *
+      Math.max(1, Math.floor(height * cacheRatio));
+    if (Konva.maxCachePixels > 0 && cachePixels > Konva.maxCachePixels) {
+      Util.error(
+        `Can not cache the node. The cache canvas needs ${cachePixels} pixels, over the Konva.maxCachePixels budget of ${Konva.maxCachePixels} (${width}x${height} at pixel ratio ${cacheRatio}). Caching is skipped; the node keeps rendering without a cache. Raise Konva.maxCachePixels (0 disables it) or pass a smaller cache box.`
+      );
+      return this;
+    }
+
     const cachedSceneCanvas = new SceneCanvas({
         pixelRatio: pixelRatio,
         width: width,
@@ -597,6 +612,7 @@ export abstract class Node<Config extends NodeConfig = NodeConfig> {
 
     // Entering cache space changes non-scaling stroke bounds for descendants.
     this._clearSelfAndDescendantCache();
+    this._markPartialFullRedraw();
     this._requestDraw();
 
     return this;
@@ -2512,6 +2528,21 @@ export abstract class Node<Config extends NodeConfig = NodeConfig> {
       drawNode?.batchDraw();
     }
   }
+  // tell the owning layer's partial renderer that this node's pixels or hit
+  // region may have changed. Structural changes mark the layer for a full
+  // redraw instead (see Container add/remove and the z-order methods).
+  _markPartialChange() {
+    const layer = this.getLayer?.() as
+      (Node & { _markNodeChanged?: (node: Node) => void }) | undefined;
+    layer?._markNodeChanged?.(this);
+  }
+  // structural change (child list, z-order, layer size): the layer cannot
+  // reconstruct the old painted regions, so its next draw must be whole-canvas
+  _markPartialFullRedraw() {
+    const layer = this.getLayer?.() as
+      (Node & { _markPartialFullRedraw?: () => void }) | undefined;
+    layer?._markPartialFullRedraw?.();
+  }
   _setAttr<AttrConfig extends Config, K extends AnyString<keyof Config>>(
     key: K,
     val: K extends keyof AttrConfig ? AttrConfig[K] : any
@@ -2529,6 +2560,7 @@ export abstract class Node<Config extends NodeConfig = NodeConfig> {
     if (this._shouldFireChangeEvents) {
       this._fireChangeEvent(key, oldVal, val);
     }
+    this._markPartialChange();
     this._requestDraw();
   }
   _fireAndBubble(eventType, evt, compareShape?) {
@@ -3023,6 +3055,8 @@ Node.prototype.on(TRANSFORM_CHANGE_STR, function () {
 
 Node.prototype.on('visibleChange.konva', function () {
   this._clearSelfAndDescendantCache(VISIBLE);
+  // appearing/disappearing changes both old and new painted regions
+  this._markPartialFullRedraw();
 });
 Node.prototype.on('listeningChange.konva', function () {
   this._clearSelfAndDescendantCache(LISTENING);
@@ -3033,6 +3067,7 @@ Node.prototype.on('listeningChange.konva', function () {
       cache.hit = null;
     }
   }
+  this._markPartialFullRedraw();
 });
 Node.prototype.on('opacityChange.konva', function () {
   this._clearSelfAndDescendantCache(ABSOLUTE_OPACITY);

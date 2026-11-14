@@ -68,6 +68,35 @@ export const Konva = {
    */
   hitOnDragEnabled: false,
   /**
+   * Should layers redraw only the regions affected by a change instead of the
+   * whole canvas? When enabled (the default) a node move or a style change
+   * repaints just the union of its previous and new painted bounds, on both the
+   * scene and the hit canvas. Structural changes, resizes and anything that
+   * cannot be bounded still trigger a full redraw, so rendered output and hit
+   * results are unchanged. Set to false to restore whole-canvas redraws.
+   * @property partialDrawEnabled
+   * @default true
+   * @name partialDrawEnabled
+   * @memberof Konva
+   * @example
+   * Konva.partialDrawEnabled = false;
+   */
+  partialDrawEnabled: true,
+  /**
+   * Maximum number of device pixels a single `node.cache()` call may allocate
+   * across its scene and filter canvases. Caching a node whose backing canvas
+   * would exceed this budget is skipped with a `Konva.Util.error`, and the node
+   * keeps rendering uncached as a graceful degradation. Set to 0 to disable the
+   * budget. The default, 4096 * 4096, matches the largest common canvas edge.
+   * @property maxCachePixels
+   * @default 16777216
+   * @name maxCachePixels
+   * @memberof Konva
+   * @example
+   * Konva.maxCachePixels = 2048 * 2048;
+   */
+  maxCachePixels: 4096 * 4096,
+  /**
    * Should we capture touch events and bind them to the touchstart target? That is how it works on DOM elements.
    * The case: we touchstart on div1, then touchmove out of that element into another element div2.
    * DOM will continue trigger touchmove events on div1 (not div2). Because events are "captured" into initial target.

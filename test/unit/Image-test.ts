@@ -107,10 +107,21 @@ describe('Image', function () {
 
       var trace = layer.getContext().getTrace();
 
-      assert.equal(
-        trace,
-        'clearRect(0,0,578,200);save();transform(1,0,0,1,150,30);drawImage([object HTMLImageElement],135,7,167,134,0,0,100,100);restore();clearRect(0,0,578,200);save();transform(1,0,0,1,150,30);drawImage([object HTMLImageElement],135,7,167,134,0,0,200,100);restore();clearRect(0,0,578,200);save();transform(1,0,0,1,150,30);drawImage([object HTMLImageElement],135,7,167,134,0,0,100,100);restore();'
-      );
+      if (Konva.partialDrawEnabled) {
+        // only the first frame clears the whole layer; later width changes
+        // clear and clip just the painted region
+        assert.equal(
+          (trace.match(/clearRect\(0,0,578,200\)/g) || []).length,
+          1
+        );
+        assert.include(trace, 'rect(149,29,202,102);clip();');
+        assert.include(trace, 'rect(149,29,102,102);clip();');
+      } else {
+        assert.equal(
+          trace,
+          'clearRect(0,0,578,200);save();transform(1,0,0,1,150,30);drawImage([object HTMLImageElement],135,7,167,134,0,0,100,100);restore();clearRect(0,0,578,200);save();transform(1,0,0,1,150,30);drawImage([object HTMLImageElement],135,7,167,134,0,0,200,100);restore();clearRect(0,0,578,200);save();transform(1,0,0,1,150,30);drawImage([object HTMLImageElement],135,7,167,134,0,0,100,100);restore();'
+        );
+      }
 
       done();
     });

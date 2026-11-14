@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Partial vs whole-layer redraw</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 16px;
+      }
+      table {
+        border-collapse: collapse;
+        margin-top: 12px;
+      }
+      td,
+      th {
+        border: 1px solid #999;
+        padding: 4px 10px;
+        text-align: right;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      Run <code>npm run compile</code> before opening this file. Each scenario
+      builds a layer of many nodes, then moves one node per frame and times
+      <code>layer.draw()</code> with whole-canvas redraws
+      (<code>Konva.partialDrawEnabled = false</code>) and dirty-region redraws
+      (<code>true</code>, the default). Lower milliseconds are better; the hit
+      graph and rendered pixels stay identical.
+    </p>
+    <button id="run">Run benchmark</button>
+    <table id="table">
+      <thead>
+        <tr>
+          <th>scenario</th>
+          <th>nodes</th>
+          <th>full redraw (ms)</th>
+          <th>partial redraw (ms)</th>
+          <th>speedup</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <script src="../../konva.js"></script>
+    <script>
+      const button = document.getElementById('run');
+      const tbody = document.querySelector('tbody');
+
+      function buildLayer(count, deep) {
+        const stage = new Konva.Stage({
+          container: document.createElement('div'),
+          width: 1280,
+          height: 720,
+        });
+        const layer = new Konva.Layer();
+        stage.add(layer);
+        let parent = layer;
+        const depth = deep ? 8 : 1;
+        for (let d = 0; d < depth; d++) {
+          const group = new Konva.Group({ x: 0, y: 0 });
+          parent.add(group);
+          parent = group;
+        }
+        const nodes = [];
+        for (let i = 0; i < count; i++) {
+          const shape = new Konva.Rect({
+            x: (i % 40) * 30,
+            y: Math.floor(i / 40) * 30,
+            width: 24,
+            height: 24,
+            fill: i % 2 ? '#3a7' : '#37a',
+            stroke: '#222',
+            strokeWidth: 1,
+          });
+          parent.add(shape);
+          nodes.push(shape);
+        }
+        layer.draw();
+        return { stage, layer, nodes };
+      }
+
+      function timeDraw(layer, nodes, frames) {
+        const start = performance.now();
+        for (let f = 0; f < frames; f++) {
+          nodes[0].x(20 + ((f * 7) % 400));
+          layer.draw();
+        }
+        return (performance.now() - start) / frames;
+      }
+
+      const scenarios = [
+        { name: 'flat layer', count: 1000, deep: false },
+        { name: 'flat layer', count: 4000, deep: false },
+        { name: 'deep containers (8 levels)', count: 1000, deep: true },
+        { name: 'overlapping nodes', count: 2000, deep: false },
+      ];
+      const FRAMES = 60;
+
+      button.addEventListener('click', () => {
+        button.disabled = true;
+        tbody.innerHTML = '';
+        scenarios.forEach((scenario) => {
+          Konva.partialDrawEnabled = false;
+          let full = buildLayer(scenario.count, scenario.deep);
+          const fullMs = timeDraw(full.layer, full.nodes, FRAMES);
+          full.stage.destroy();
+
+          Konva.partialDrawEnabled = true;
+          let partial = buildLayer(scenario.count, scenario.deep);
+          const partialMs = timeDraw(partial.layer, partial.nodes, FRAMES);
+          partial.stage.destroy();
+
+          const row = document.createElement('tr');
+          row.innerHTML =
+            '<td>' +
+            scenario.name +
+            '</td><td>' +
+            scenario.count +
+            '</td><td>' +
+            fullMs.toFixed(3) +
+            '</td><td>' +
+            partialMs.toFixed(3) +
+            '</td><td>' +
+            (fullMs / partialMs).toFixed(2) +
+            'x</td>';
+          tbody.appendChild(row);
+        });
+        button.disabled = false;
+      });
+    </script>
+  </body>
+</html>

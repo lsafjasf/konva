@@ -5,6 +5,9 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- Added dirty-region (partial) redraw to `Konva.Layer`, enabled with the new `Konva.partialDrawEnabled` (default `true`). Moving one node or changing one style now repaints only the union of the node's previous and new painted bounds on both the scene and hit canvases instead of the whole layer, while structural changes, resizes, `clearBeforeDraw = false`, unbounded custom `sceneFunc` drawing and anything that cannot be bounded fall back to a full redraw. Rendered output and hit results are unchanged
+- Added `Konva.maxCachePixels` (default `4096 * 4096`, `0` disables it): `node.cache()` whose backing canvas would exceed the budget is skipped with a clear `Konva.Util.error`, and the node keeps rendering uncached instead of allocating an oversized bitmap
+- Partial redraw keeps clipping, shadows, filters, opacity groups, non-scaling strokes and inherited transforms correct, tracks `hitStrokeWidth` on the hit graph, rebuilds the whole hit graph after it was skipped during dragging/transforming, and reuses painted bounds within a frame to avoid repeated `getClientRect()` measurements
 - Fixed `Text` word wrap for Chinese and Japanese: lines break between characters, not only at spaces. Thanks [@b84330808](https://github.com/b84330808)
 - Fixed `Text` word wrap starting a line with a dash. Thanks [@nk-batman21](https://github.com/nk-batman21)
 - Fixed `\r\n` line endings making `Text` lines one space wider. Thanks [@b84330808](https://github.com/b84330808)

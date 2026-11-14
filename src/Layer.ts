@@ -1,4 +1,4 @@
-import { Util } from './Util.ts';
+import { Transform, Util } from './Util.ts';
 import type { ContainerConfig } from './Container.ts';
 import { Container } from './Container.ts';
 import { Node } from './Node.ts';
@@ -12,6 +12,25 @@ import type { Shape } from './Shape.ts';
 import { shapes } from './Shape.ts';
 import { _registerNode, Konva } from './Global.ts';
 import { DD } from './DragAndDrop.ts';
+import {
+  addDirtyRegion,
+  addHitDirtyRegion,
+  beginFrame,
+  createPartialRenderState,
+  endFrame,
+  getHitPaintedBounds,
+  getPaintedBounds,
+  getPaintedMatrix,
+  intersectsRegions,
+  isCullable,
+  markFullRedraw,
+  markNodeChanged,
+  prepareRegions,
+  releaseFrame,
+  rememberMatrix,
+  sameMatrix,
+  type PartialRenderState,
+} from './PartialRender.ts';
 
 export interface LayerConfig extends ContainerConfig {
   clearBeforeDraw?: boolean;
@@ -60,6 +79,8 @@ export class Layer extends Container<Group | Shape> {
   });
 
   _waitingForDraw = false;
+  // dirty-region bookkeeping for partial redraws (see PartialRender.ts)
+  _partial: PartialRenderState = createPartialRenderState();
 
   constructor(config?: LayerConfig) {
     super(config);
@@ -120,6 +141,9 @@ export class Layer extends Container<Group | Shape> {
   clear(bounds?: IRect) {
     this.getContext().clear(bounds);
     this.getHitCanvas().getContext().clear(bounds);
+    // the bitmap no longer matches the painted-matrix snapshot; rebuilding
+    // partially would leave holes where pixels were cleared manually
+    markFullRedraw(this._partial);
     return this;
   }
   // extend Node.prototype.setZIndex
@@ -209,6 +233,189 @@ export class Layer extends Container<Group | Shape> {
   getLayer() {
     return this;
   }
+  // ---- partial redraw bookkeeping ----------------------------------------
+  _markPartialFullRedraw() {
+    if (this._partial) markFullRedraw(this._partial);
+  }
+  _markNodeChanged(node: Node) {
+    if (!Konva.partialDrawEnabled || !this._partial) return;
+    markNodeChanged(this._partial, node);
+  }
+  // the painted bounds of a node before and after a change, in layer
+  // coordinates. Both are needed: the old position has to be cleared, the new
+  // one repainted.
+  _collectNodeDirtyRegions(node: Node) {
+    const state = this._partial;
+    if (!isCullable(node)) {
+      markFullRedraw(state);
+      return;
+    }
+    const previousMatrix = getPaintedMatrix(state, node);
+    const currentMatrix = node.getAbsoluteTransform().getMatrix();
+    const moved = !sameMatrix(previousMatrix, currentMatrix);
+    let oldScene: IRect | undefined;
+    let oldHit: IRect | undefined;
+    if (moved && previousMatrix) {
+      oldScene = this._boundsWithMatrix(node, previousMatrix);
+      oldHit = this._hitBoundsWithMatrix(node, previousMatrix);
+      if (oldScene === undefined || oldHit === undefined) {
+        markFullRedraw(state);
+        return;
+      }
+    }
+    const newScene = getPaintedBounds(node);
+    const newHit = getHitPaintedBounds(node);
+    if (newScene === undefined || newHit === undefined) {
+      markFullRedraw(state);
+      return;
+    }
+    state.frameBounds.set(node, newScene);
+    if (oldScene) addDirtyRegion(state, oldScene);
+    addDirtyRegion(state, newScene);
+    if (oldHit) addHitDirtyRegion(state, oldHit);
+    addHitDirtyRegion(state, newHit);
+  }
+  // painted bounds of a node as if it carried `matrix`; used to recover the
+  // region a moved node occupied on the previous frame
+  _boundsWithMatrix(node: Node, matrix: number[]): IRect | undefined {
+    const local = node.getClientRect({
+      skipTransform: true,
+    });
+    if (
+      !isFinite(local.x + local.y + local.width + local.height) ||
+      local.width <= 0 ||
+      local.height <= 0
+    ) {
+      return undefined;
+    }
+    const rect = new Transform(matrix)._getTransformedRect(local);
+    return isFinite(rect.x + rect.y + rect.width + rect.height) &&
+      rect.width > 0 &&
+      rect.height > 0
+      ? rect
+      : undefined;
+  }
+  // like _boundsWithMatrix, but expanded for a shape's hit stroke so a moved
+  // shape clears its previous hit pixels as well as its scene pixels
+  _hitBoundsWithMatrix(node: Node, matrix: number[]): IRect | undefined {
+    const scene = this._boundsWithMatrix(node, matrix);
+    if (!scene) return undefined;
+    const shape = node as unknown as {
+      nodeType?: string;
+      hasHitStroke?: () => boolean;
+      hitStrokeWidth?: () => number | string;
+      strokeWidth?: () => number;
+    };
+    if (shape.nodeType !== 'Shape' || !shape.hasHitStroke?.()) {
+      return scene;
+    }
+    let hitWidth = shape.hitStrokeWidth!();
+    if (hitWidth === 'auto') {
+      hitWidth = shape.strokeWidth ? shape.strokeWidth() : 0;
+    }
+    const padding = Math.max(0, (Number(hitWidth) || 0) / 2);
+    if (padding === 0) return scene;
+    return {
+      x: scene.x - padding,
+      y: scene.y - padding,
+      width: scene.width + padding * 2,
+      height: scene.height + padding * 2,
+    };
+  }
+  // walk the tree once before drawing to turn changed nodes into regions and
+  // to sync the painted-matrix snapshot with the nodes that exist right now.
+  // Returns the regions to repaint, or null for a full redraw.
+  _preparePartialFrame(): IRect[] | null {
+    const state = this._partial;
+    if (state.preparedRegions !== null) {
+      return state.preparedRegions;
+    }
+    const regions = this._computePartialRegions();
+    state.preparedRegions = regions;
+    return regions;
+  }
+  _preparePartialHitFrame(): IRect[] | null {
+    const state = this._partial;
+    if (state.hitInvalid) {
+      return null;
+    }
+    if (state.preparedHitRegions !== undefined) {
+      return state.preparedHitRegions;
+    }
+    // the scene pre-walk already collected the hit regions into hitRegions
+    const regions = state.forceFull
+      ? null
+      : prepareRegions(state, this, state.hitRegions);
+    state.preparedHitRegions = regions;
+    return regions;
+  }
+  _computePartialRegions(): IRect[] | null {
+    const state = this._partial;
+    if (state.forceFull) {
+      return null;
+    }
+    const seen = new Set<Node>();
+    const walk = (container: Container) => {
+      for (const child of container.children) {
+        seen.add(child);
+        if (state.changed.has(child)) {
+          this._collectNodeDirtyRegions(child);
+          if (state.forceFull) return;
+        }
+        if (child.hasChildren()) {
+          walk(child as unknown as Container);
+          if (state.forceFull) return;
+        }
+      }
+    };
+    walk(this);
+    if (state.forceFull) {
+      return null;
+    }
+    // removed or replaced nodes leave regions that cannot be reconstructed
+    for (const node of state.painted.keys()) {
+      if (!seen.has(node)) {
+        markFullRedraw(state);
+        return null;
+      }
+    }
+    return prepareRegions(state, this, state.regions);
+  }
+  _syncPaintedMatrices(top: Node | undefined) {
+    const state = this._partial;
+    const walk = (container: Container) => {
+      for (const child of container.children) {
+        if (!(top ? child._isVisible(top) : child.isVisible())) {
+          state.painted.delete(child);
+        } else {
+          rememberMatrix(
+            state,
+            child,
+            child.getAbsoluteTransform().getMatrix()
+          );
+          if (child.hasChildren()) {
+            walk(child as unknown as Container);
+          }
+        }
+      }
+    };
+    walk(this);
+  }
+  // a node is skipped during a partial frame when its whole painted area lies
+  // outside every dirty region. Unbounded custom drawing is never culled.
+  _isPartialCulled(node: Node, drawMethod: string): boolean {
+    const state = this._partial;
+    if (!state.active) return false;
+    if (drawMethod === 'drawHit' && !node.shouldDrawHit()) return false;
+    let bounds = state.frameBounds.get(node);
+    if (!bounds) {
+      if (!isCullable(node)) return false;
+      bounds = getPaintedBounds(node);
+      if (!bounds) return false;
+      state.frameBounds.set(node, bounds);
+    }
+    return !intersectsRegions(state, node, bounds);
+  }
   remove() {
     super.remove();
 
@@ -229,6 +436,8 @@ export class Layer extends Container<Group | Shape> {
     this.canvas.setSize(width, height);
     this._syncHitCanvasSize();
     this._setSmoothEnabled();
+    // a bitmap reallocation clears the canvas, so the next draw must paint all
+    markFullRedraw(this._partial);
     return this;
   }
   // the hit canvas is only allocated while the layer is listening;
@@ -434,12 +643,42 @@ export class Layer extends Container<Group | Shape> {
       node: this,
     });
 
-    if (this.clearBeforeDraw()) {
-      canvas.getContext().clear();
-    }
+    const ownDraw = !can && !top;
+    const regions =
+      ownDraw && Konva.partialDrawEnabled && this.clearBeforeDraw()
+        ? this._preparePartialFrame()
+        : null;
 
-    Container.prototype.drawScene.call(this, canvas, top);
+    if (regions) {
+      const context = canvas.getContext();
+      beginFrame(this._partial, regions);
+      try {
+        for (const region of regions) {
+          context.clear(region);
+        }
+        context.save();
+        context.beginPath();
+        for (const region of regions) {
+          context.rect(region.x, region.y, region.width, region.height);
+        }
+        context.clip();
+        Container.prototype.drawScene.call(this, canvas, top);
+        context.restore();
+      } finally {
+        endFrame(this._partial);
+      }
+    } else {
+      if (this.clearBeforeDraw()) {
+        canvas.getContext().clear();
+      }
+      Container.prototype.drawScene.call(this, canvas, top);
+    }
     canvas._trimIsolationCanvas();
+    // keep the painted-matrix snapshot valid for the next diff, whether the
+    // frame was partial or full
+    if (ownDraw) {
+      this._syncPaintedMatrices(top);
+    }
 
     this._fire(DRAW, {
       node: this,
@@ -467,7 +706,14 @@ export class Layer extends Container<Group | Shape> {
         underDrag = true;
       }
     });
-    return !underDrag && !Konva['Transformer']?._isLayerTransforming(this);
+    const drawHit =
+      !underDrag && !Konva['Transformer']?._isLayerTransforming(this);
+    // the hit canvas is cleared on the skipped draw, so the next hit draw
+    // has to rebuild the whole graph instead of patching regions
+    if (!drawHit && !top) {
+      this._partial.hitInvalid = true;
+    }
+    return drawHit;
   }
   drawHit(can?: HitCanvas, top?: Node) {
     const layer = this.getLayer(),
@@ -477,9 +723,57 @@ export class Layer extends Container<Group | Shape> {
       // allocate or release the hit canvas to match the current listening
       // state - this also picks up a listening change made after the last draw
       layer._syncHitCanvasSize();
-      if (layer.clearBeforeDraw()) {
-        layer.getHitCanvas().getContext().clear();
+      // the layer may be invisible or not listening: nothing to draw, but the
+      // scene frame's bookkeeping still has to be released
+      if (!this.shouldDrawHit(top)) {
+        // the canvas is still cleared, as a full drawHit would: while dragging
+        // the hit graph is intentionally empty until the drag ends
+        if (layer.clearBeforeDraw()) {
+          layer.getHitCanvas().getContext().clear();
+        }
+        if (!top && Konva.partialDrawEnabled) {
+          // remember the emptied hit graph, but release the scene frame's
+          // region bookkeeping
+          this._partial.hitInvalid = true;
+          releaseFrame(this._partial);
+        }
+        return this;
       }
+      const regions =
+        !top && Konva.partialDrawEnabled && layer.clearBeforeDraw()
+          ? this._preparePartialHitFrame()
+          : null;
+      if (regions) {
+        const context = layer.getHitCanvas().getContext();
+        beginFrame(this._partial, regions);
+        try {
+          for (const region of regions) {
+            context.clear(region);
+          }
+          context.save();
+          context.beginPath();
+          for (const region of regions) {
+            context.rect(region.x, region.y, region.width, region.height);
+          }
+          context.clip();
+          Container.prototype.drawHit.call(this, canvas, top);
+          context.restore();
+        } finally {
+          endFrame(this._partial);
+        }
+      } else {
+        if (layer.clearBeforeDraw()) {
+          layer.getHitCanvas().getContext().clear();
+        }
+        Container.prototype.drawHit.call(this, canvas, top);
+        // a whole-canvas hit rebuild is the only frame that clears the stale
+        // flag; a partial frame keeps the skipped-drag gap
+        this._partial.hitInvalid = false;
+      }
+      if (!top && Konva.partialDrawEnabled) {
+        releaseFrame(this._partial);
+      }
+      return this;
     }
 
     Container.prototype.drawHit.call(this, canvas, top);

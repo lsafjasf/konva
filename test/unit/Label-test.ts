@@ -78,10 +78,18 @@ describe('Label', function () {
     // use relaxed trace because  text can be a slightly different size in different browsers,
     // resulting in slightly different tag dimensions
     var trace = layer.getContext().getTrace(true);
-    assert.equal(
-      trace,
-      'clearRect();save();lineJoin;transform();shadowColor;shadowBlur;shadowOffsetX;shadowOffsetY;beginPath();moveTo();lineTo();lineTo();lineTo();lineTo();arc();lineTo();arc();lineTo();arc();lineTo();arc();closePath();fillStyle;fill();restore();save();transform();restore();clearRect();save();lineJoin;transform();shadowColor;shadowBlur;shadowOffsetX;shadowOffsetY;beginPath();moveTo();lineTo();lineTo();lineTo();lineTo();arc();lineTo();arc();lineTo();arc();lineTo();arc();closePath();fillStyle;fill();restore();save();transform();font;textBaseline;textAlign;translate();save();fillStyle;fillText();restore();restore();'
-    );
+    if (Konva.partialDrawEnabled) {
+      // the text changes only repaint the label bounds: one whole-canvas
+      // clear, then a bounded clear with a clip path
+      assert.equal((trace.match(/clearRect\(\)/g) || []).length, 2);
+      assert.include(trace, 'clearRect();save();beginPath();rect();clip();');
+      assert.include(trace, 'fillText();');
+    } else {
+      assert.equal(
+        trace,
+        'clearRect();save();lineJoin;transform();shadowColor;shadowBlur;shadowOffsetX;shadowOffsetY;beginPath();moveTo();lineTo();lineTo();lineTo();lineTo();arc();lineTo();arc();lineTo();arc();lineTo();arc();closePath();fillStyle;fill();restore();save();transform();restore();clearRect();save();lineJoin;transform();shadowColor;shadowBlur;shadowOffsetX;shadowOffsetY;beginPath();moveTo();lineTo();lineTo();lineTo();lineTo();arc();lineTo();arc();lineTo();arc();lineTo();arc();closePath();fillStyle;fill();restore();save();transform();font;textBaseline;textAlign;translate();save();fillStyle;fillText();restore();restore();'
+      );
+    }
   });
 
   // ======================================================

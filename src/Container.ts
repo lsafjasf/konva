@@ -92,6 +92,7 @@ export abstract class Container<
       this.children = [];
       // because all children were detached from parent, request draw via container
       this._notifySubtreeChange();
+      this._markPartialFullRedraw();
       this._requestDraw();
       return this;
     });
@@ -133,6 +134,7 @@ export abstract class Container<
       child: child,
     });
     this._notifySubtreeChange();
+    this._markPartialFullRedraw();
     this._requestDraw();
     // chainable
     return this;
@@ -338,6 +340,7 @@ export abstract class Container<
       child.index = n;
     });
     this._notifySubtreeChange();
+    this._markPartialFullRedraw();
     this._requestDraw();
   }
   drawScene(can?: SceneCanvas, top?: Node) {
@@ -437,7 +440,21 @@ export abstract class Container<
   }
 
   _drawChildNodes(drawMethod, canvas, top?: Node) {
-    this.children?.forEach(function (child) {
+    const layer = this.getLayer?.() as
+      | (Container & {
+          _partial?: { active: boolean };
+          _isPartialCulled?: (node: Node, drawMethod: string) => boolean;
+        })
+      | undefined;
+    const cull =
+      layer &&
+      layer.nodeType === 'Layer' &&
+      layer._partial?.active &&
+      layer._isPartialCulled;
+    this.children?.forEach((child) => {
+      if (cull && layer!._isPartialCulled!(child, drawMethod)) {
+        return;
+      }
       child[drawMethod](canvas, top);
     });
   }

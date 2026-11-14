@@ -208,10 +208,20 @@ describe('Circle', function () {
     layer.draw();
 
     var trace = layer.getContext().getTrace();
-    assert.equal(
-      trace,
-      'clearRect(0,0,578,200);save();transform(1,0,0,1,289,100);beginPath();arc(0,0,70,0,6.283,false);closePath();fillStyle=red;fill();restore();clearRect(0,0,578,200);save();transform(1,0,0,1,289,100);globalAlpha=0.5;beginPath();arc(0,0,70,0,6.283,false);closePath();fillStyle=red;fill();restore();clearRect(0,0,578,200);save();transform(1,0,0,1,289,100);beginPath();arc(0,0,70,0,6.283,false);closePath();fillStyle=red;fill();restore();'
-    );
+    if (Konva.partialDrawEnabled) {
+      // the first frame is whole-canvas; the two style-change frames only
+      // clear and clip the circle's 142x142 painted bounds, never the layer
+      const fullClears = trace.match(/clearRect\(0,0,578,200\)/g) || [];
+      assert.equal(fullClears.length, 1);
+      const regionClears = trace.match(/clearRect\(218,29,142,142\)/g) || [];
+      assert.equal(regionClears.length, 2);
+      assert.include(trace, 'rect(218,29,142,142);clip();');
+    } else {
+      assert.equal(
+        trace,
+        'clearRect(0,0,578,200);save();transform(1,0,0,1,289,100);beginPath();arc(0,0,70,0,6.283,false);closePath();fillStyle=red;fill();restore();clearRect(0,0,578,200);save();transform(1,0,0,1,289,100);globalAlpha=0.5;beginPath();arc(0,0,70,0,6.283,false);closePath();fillStyle=red;fill();restore();clearRect(0,0,578,200);save();transform(1,0,0,1,289,100);beginPath();arc(0,0,70,0,6.283,false);closePath();fillStyle=red;fill();restore();'
+      );
+    }
   });
 
   // ======================================================
